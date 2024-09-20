@@ -115,7 +115,8 @@ runs:
             "-dest:iisApp=${{ inputs.server-iis-site-name }},computerName=${{ inputs.server-msdeploy-url }},username=${{ inputs.server-msdeploy-username }},password=${{ inputs.server-msdeploy-password }},authtype=Basic,includeAcls=False",
             "-skip:${{ inputs.msdeploy-skip-parameter }}",
             "-AllowUntrusted",
-            "-verbose"
+            "-verbose",
+            "-enableRule:AppOffline"
         )
         
         do {
@@ -123,11 +124,11 @@ runs:
           
           try {
             & $msdeployPath $arguments
-            if ($lastexitcode -gt 0) { throw } else { WriteLog("Done!") }
+            if ($lastexitcode -gt 0 -or $Error.Count -gt 0) { throw } else { WriteLog("Done!") }
             break;
           } catch {
             $retries++
-            WriteLog("Failed with error $_")
+            WriteLog("Failed with some error")
             if ($retries -lt $max_retries) {
               echo "Retrying in a few seconds"
             }
