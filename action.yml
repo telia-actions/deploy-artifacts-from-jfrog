@@ -1,4 +1,4 @@
-name: 'Deploy artifacts from JFrog'
+name: 'Deploy artifacts to IIS using WebDeploy'
 description: 'Download artifacts from JFrog by given repository name and unique string (usually short git sha) in the artifact name and deploys to given server. Uses Powershell.'
 inputs:
   jfrog-repo-name:
@@ -13,6 +13,9 @@ inputs:
   search-phrase:
     description: 'Substring of artifact name, usually short GIT SHA'
     required: true
+  search-phrase-cleanup:
+    description: 'Flag indicating if search-phrase input should be cleaned from spaces. Accepts "True" or "False" values. "True" by default'
+    required: false
   archive-extension:
     description: 'Extension of artifact archive file'
     required: true
@@ -27,13 +30,25 @@ inputs:
     description: 'Server user password to use for deploying'
     required: true
   server-iis-site-name:
-    description: 'Name of the IIS site on the server'
-    required: true
+    description: 'Name of the IIS site on the server. Either this or server-destination-path is required.'
+    required: false
+  server-destination-path:
+    description: 'Path on server to install application to. Either this or server-iis-site-name is required'
+    required: false
+  presync-command-file-path:
+    description: 'Path to cmd file to run before installation'
+    required: false
+  postsync-command-file-path:
+    description: 'Path to cmd file to run after installation'
+    required: false
   application-path:
     description: 'Optional sub-path of application in JFrog artifact (in case archive contains more than one application or application source is in some sub-folder)'
     required: false
   msdeploy-skip-parameter:
     description: 'Optional MsDeploy -skip parameter value. For example, objectName=dirPath,absolutePath=Logs, or objectName=filePath,absolutePath=site.config.'
+  local-storage-path:
+    description: 'Optional path of local (usually self-hosted) runner''s directory where artifacts might be stored for faster access (instead of downloading from JFrog and extracting). Action continues with searching in JFrog if no matches found locally.'
+    required: false
 runs:
   using: "composite"
   steps:
@@ -50,37 +65,66 @@ runs:
           Write-Host $Text -BackgroundColor DarkMagenta -ForegroundColor Gray
         }
         
-        $authHeaderValue = "Basic " + [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("${{ inputs.jfrog-username }}:${{ inputs.jfrog-password }}"))
-        
-        WriteLog("Searching for artifact with '${{ inputs.search-phrase }}' in repository '${{ inputs.jfrog-repo-name }}'")
-        
-        $response = Invoke-WebRequest `
-          -Method Get `
-          -Uri "https://jfrog.teliacompany.io/artifactory/api/search/artifact?name=${{ inputs.search-phrase }}&repos=${{ inputs.jfrog-repo-name }}" `
-          -Headers @{ "Authorization" = $authHeaderValue; "X-Result-Detail" = "info" } `
-          -UseBasicParsing
-        
-        $results = (ConvertFrom-Json -InputObject ([System.Text.Encoding]::UTF8.GetString($response.Content))).results
-        $firstArtifact = $results | Sort-Object created -Descending | Select-Object -First 1
-        
-        if ($firstArtifact -eq $null) {
-          throw "No artifact found with GIT commit hash ${{ inputs.commit_hash }}"
+        # validations
+        if (!"${{ inputs.server-iis-site-name }}" -and !"${{ inputs.server-destination-path }}") {
+          throw "Missing parameter value: either server-iis-site-name or server-destination-path must be provided."
         }
         
-        WriteLog("Downloading artifact '$firstArtifact'")
+        $searchValue = "${{ inputs.search-phrase }}"
+        if ("${{ inputs.search-phrase-cleanup }}" -ne "False") {
+          $searchValue = $searchValue.Replace(" ", "")
+        }
         
-        Invoke-WebRequest `
-          -Method Get `
-          -Uri $firstArtifact.downloadUri `
-          -Headers @{ "Authorization" = $authHeaderValue } `
-          -OutFile "${{ github.workspace }}\Artifact.${{ inputs.archive-extension }}" `
-          -UseBasicParsing
+        $firstArtifact = $null
+        $artifactDestinationPath = "${{ github.workspace }}\_deploy"
+        $localStoragePath = "${{ inputs.local-storage-path }}"
         
-        WriteLog("Extracting artifact to '${{ github.workspace }}\_deploy'")
+        # Checking local storage first
+        if (!!$localStoragePath) {
+          WriteLog("Searching for artifact with '$searchValue' in local storage '$localStoragePath'")
+          $results = Get-ChildItem -Path "$localStoragePath" -Filter "*$searchValue*"
+          $firstArtifact = $results | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          
+          if (!$firstArtifact) {
+            WriteLog("No artifact found in local storage '$localStoragePath'")
+          } else {
+            WriteLog("Found artifact '$firstArtifact', copying to '$artifactDestinationPath'")
+            Copy-Item "$localStoragePath\$firstArtifact" -Destination $artifactDestinationPath -Recurse
+          }
+        }
         
-        $artifactZip = "${{ github.workspace }}\Artifact.${{ inputs.archive-extension }}"
-        $artifactPath = "${{ github.workspace }}\_deploy"
-        Expand-Archive -Path $artifactZip -DestinationPath $artifactPath -Force
+        # Searching in JFrog
+        if (!$firstArtifact) {
+          WriteLog("Searching for artifact with '$searchValue' in JFrog repository '${{ inputs.jfrog-repo-name }}'")
+          
+          $authHeaderValue = "Basic " + [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("${{ inputs.jfrog-username }}:${{ inputs.jfrog-password }}"))
+          $response = Invoke-WebRequest `
+            -Method Get `
+            -Uri "https://jfrog.teliacompany.io/artifactory/api/search/artifact?name=$searchValue&repos=${{ inputs.jfrog-repo-name }}" `
+            -Headers @{ "Authorization" = $authHeaderValue; "X-Result-Detail" = "info" } `
+            -UseBasicParsing
+          
+          $results = (ConvertFrom-Json -InputObject ([System.Text.Encoding]::UTF8.GetString($response.Content))).results
+          $firstArtifact = $results | Sort-Object created -Descending | Select-Object -First 1
+          
+          if (!$firstArtifact) {
+            throw "No artifact found with GIT commit hash ${{ inputs.commit_hash }}"
+          }
+          
+          WriteLog("Downloading artifact '$firstArtifact'")
+          
+          Invoke-WebRequest `
+            -Method Get `
+            -Uri $firstArtifact.downloadUri `
+            -Headers @{ "Authorization" = $authHeaderValue } `
+            -OutFile "${{ github.workspace }}\Artifact.${{ inputs.archive-extension }}" `
+            -UseBasicParsing
+          
+          WriteLog("Extracting artifact to '$artifactDestinationPath'")
+          
+          $artifactZip = "${{ github.workspace }}\Artifact.${{ inputs.archive-extension }}"
+          Expand-Archive -Path $artifactZip -DestinationPath $artifactDestinationPath -Force
+        }
         
         $msdeployPath = "C:\Program Files\IIS\Microsoft Web Deploy V3\msdeploy.exe"
         
@@ -109,30 +153,62 @@ runs:
         $max_retries = 3
         $retries = 0
         
+        
+        
         $arguments = @(
             "-verb:sync",
-            "-source:iisApp=${{ github.workspace }}\_deploy\${{ inputs.application-path }}",
-            "-dest:iisApp=${{ inputs.server-iis-site-name }},computerName=${{ inputs.server-msdeploy-url }},username=${{ inputs.server-msdeploy-username }},password=${{ inputs.server-msdeploy-password }},authtype=Basic,includeAcls=False",
-            "-skip:${{ inputs.msdeploy-skip-parameter }}",
             "-AllowUntrusted",
             "-verbose",
             "-enableRule:AppOffline"
         )
+        
+        if (!!"${{ inputs.server-iis-site-name }}") {
+          $arguments += @(
+            "-dest:iisApp=${{ inputs.server-iis-site-name }},computerName=${{ inputs.server-msdeploy-url }},username=${{ inputs.server-msdeploy-username }},password=${{ inputs.server-msdeploy-password }},authtype=Basic,includeAcls=False",
+            "-source:iisApp=$artifactDestinationPath\${{ inputs.application-path }}"
+          )
+        } else {
+          $arguments += @(
+            "-dest:dirPath=`"${{ inputs.server-destination-path }}`",computerName=${{ inputs.server-msdeploy-url }},username=${{ inputs.server-msdeploy-username }},password=${{ inputs.server-msdeploy-password }},authtype=Basic,includeAcls=False",
+            "-source:dirPath=$artifactDestinationPath\${{ inputs.application-path }}"
+          )
+        }
+        
+        if (!!"${{ inputs.msdeploy-skip-parameter }}") {
+          $arguments += "-skip:${{ inputs.msdeploy-skip-parameter }}"
+        }
+        
+        if (!!"${{ inputs.presync-command-file-path }}") {
+          $arguments += "-preSync:runCommand=`"${{ inputs.presync-command-file-path }}`",waitInterval=30000"
+        }
+        
+        if (!!"${{ inputs.postsync-command-file-path }}") {
+          $arguments += "-postSync:runCommand=`"${{ inputs.postsync-command-file-path }}`",waitInterval=30000"
+        }
         
         do {
           WriteLog("Deploying to ${{ inputs.server-msdeploy-url }}")
           
           try {
             & $msdeployPath $arguments
-            if ($lastexitcode -gt 0 -or $Error.Count -gt 0) { throw } else { WriteLog("Done!") }
+            
+            if ($lastexitcode -ne 0) {
+              echo "Last exit code = $lastexitcode"
+              throw
+            }
+            
+            WriteLog("Done!")
             break;
+            
           } catch {
             $retries++
-            WriteLog("Failed with some error")
+            
             if ($retries -lt $max_retries) {
-              echo "Retrying in a few seconds"
+              WriteLog("Failed. Retrying in a few seconds.")
+              Start-Sleep -Milliseconds 1000
+            } else {
+              WriteLog("Deployment failed after $max_retries retries.")
             }
-            Start-Sleep -Milliseconds 3000
           }
         } while ($retries -lt $max_retries)
 
