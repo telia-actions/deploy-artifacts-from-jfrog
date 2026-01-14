@@ -89,7 +89,9 @@ runs:
             WriteLog("No artifact found in local storage '$localStoragePath'")
           } else {
             WriteLog("Found artifact '$firstArtifact', copying to '$artifactDestinationPath'")
-            Copy-Item "$localStoragePath\$firstArtifact" -Destination $artifactDestinationPath -Recurse
+            $robocopy_params = @("$localStoragePath\$firstArtifact", $artifactDestinationPath)
+            $robocopy_options = @("*.*", "/s", "/COPY:DAT", "/NODCOPY")
+            & robocopy $robocopy_params + $robocopy_options #using robocopy instead of Copy-Item to be able to manage long paths (Copy-Item has some limits)
           }
         }
         
