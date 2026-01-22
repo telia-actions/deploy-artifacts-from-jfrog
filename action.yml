@@ -213,4 +213,6 @@ runs:
             }
           }
         } while ($retries -lt $max_retries)
-
+        
+        # Clearing deploy folder just in case some other deploys are to be done in the same workflow.
+        Get-ChildItem $artifactDestinationPath | Remove-Item -recurse -Force
