@@ -203,11 +203,10 @@ runs:
             break;
             
           } catch {
-            $retries++
-            
             if ($retries -lt $max_retries) {
               WriteLog("Failed. Retrying in a few seconds.")
-              Start-Sleep -Milliseconds 1000
+              $retries++
+              Start-Sleep -Milliseconds (3000 * $retries * $retries) #increasing time gaps between retries (3 secs, 12 secs, 27 secs)
             } else {
               WriteLog("Deployment failed after $max_retries retries.")
             }
