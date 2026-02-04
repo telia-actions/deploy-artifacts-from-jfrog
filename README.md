@@ -37,6 +37,7 @@ Name of JFrog repository to download from. **Required**
   Optional sub-path of application in JFrog artifact (in case archive contains more than one application or application source is in some sub-folder).
 ### msdeploy-skip-parameter:
   Optional MsDeploy -skip parameter value. For example, `objectName=dirPath,absolutePath=Logs`, or `objectName=filePath,absolutePath=site.config`.
+  For multiple values pass semicolon separated values, for example, `objectName=appPool;objectName=application`.
 ### local-storage-path:
   Optional path of local (usually self-hosted) runner's directory where artifacts might be stored after packaging them for faster access (instead of downloading from JFrog and extracting). Action continues with searching in JFrog if no matches found locally.
 

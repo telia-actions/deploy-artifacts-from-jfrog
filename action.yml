@@ -45,7 +45,7 @@ inputs:
     description: 'Optional sub-path of application in JFrog artifact (in case archive contains more than one application or application source is in some sub-folder)'
     required: false
   msdeploy-skip-parameter:
-    description: 'Optional MsDeploy -skip parameter value. For example, objectName=dirPath,absolutePath=Logs, or objectName=filePath,absolutePath=site.config.'
+    description: 'Optional MsDeploy -skip parameter value. For example, objectName=dirPath,absolutePath=Logs, or objectName=filePath,absolutePath=site.config. For multiple values pass semicolon separated values, for example, "objectName=appPool;objectName=application"'
   local-storage-path:
     description: 'Optional path of local (usually self-hosted) runner''s directory where artifacts might be stored for faster access (instead of downloading from JFrog and extracting). Action continues with searching in JFrog if no matches found locally.'
     required: false
@@ -152,10 +152,6 @@ runs:
           WriteLog("Web Deploy installed successfully")
         }
         
-        $max_retries = 3
-        $retries = 0
-        
-        
         
         $arguments = @(
             "-verb:sync",
@@ -177,7 +173,9 @@ runs:
         }
         
         if (!!"${{ inputs.msdeploy-skip-parameter }}") {
-          $arguments += "-skip:${{ inputs.msdeploy-skip-parameter }}"
+          foreach ($skipParam in "${{ inputs.msdeploy-skip-parameter }}".Split(";")) {
+            $arguments += "-skip:$skipParam"
+          }
         }
         
         if (!!"${{ inputs.presync-command-file-path }}") {
@@ -187,6 +185,9 @@ runs:
         if (!!"${{ inputs.postsync-command-file-path }}") {
           $arguments += "-postSync:runCommand=`"${{ inputs.postsync-command-file-path }}`",waitInterval=30000"
         }
+        
+        $max_retries = 3
+        $retries = 0
         
         do {
           WriteLog("Deploying to ${{ inputs.server-msdeploy-url }}")
@@ -209,9 +210,10 @@ runs:
               Start-Sleep -Milliseconds (3000 * $retries * $retries) #increasing time gaps between retries (3 secs, 12 secs, 27 secs)
             } else {
               WriteLog("Deployment failed after $max_retries retries.")
+              $max_retries = 0
             }
           }
-        } while ($retries -lt $max_retries)
+        } while ($max_retries -ne 0)
         
         # Clearing deploy folder just in case some other deploys are to be done in the same workflow.
         Get-ChildItem $artifactDestinationPath | Remove-Item -recurse -Force
