@@ -162,12 +162,12 @@ runs:
         
         if (!!"${{ inputs.server-iis-site-name }}") {
           $arguments += @(
-            "-dest:iisApp=${{ inputs.server-iis-site-name }},computerName=${{ inputs.server-msdeploy-url }},username=${{ inputs.server-msdeploy-username }},password=${{ inputs.server-msdeploy-password }},authtype=Basic,includeAcls=False",
+            '-dest:iisApp=${{ inputs.server-iis-site-name }},computerName=${{ inputs.server-msdeploy-url }},username=${{ inputs.server-msdeploy-username }},password="${{ inputs.server-msdeploy-password }}",authtype=Basic,includeAcls=False',
             "-source:iisApp=$artifactDestinationPath\${{ inputs.application-path }}"
           )
         } else {
           $arguments += @(
-            "-dest:dirPath=`"${{ inputs.server-destination-path }}`",computerName=${{ inputs.server-msdeploy-url }},username=${{ inputs.server-msdeploy-username }},password=${{ inputs.server-msdeploy-password }},authtype=Basic,includeAcls=False",
+            '-dest:dirPath="${{ inputs.server-destination-path }}",computerName=${{ inputs.server-msdeploy-url }},username=${{ inputs.server-msdeploy-username }},password="${{ inputs.server-msdeploy-password }}",authtype=Basic,includeAcls=False',
             "-source:dirPath=$artifactDestinationPath\${{ inputs.application-path }}"
           )
         }
@@ -179,11 +179,11 @@ runs:
         }
         
         if (!!"${{ inputs.presync-command-file-path }}") {
-          $arguments += "-preSync:runCommand=`"${{ inputs.presync-command-file-path }}`",waitInterval=30000"
+          $arguments += '-preSync:runCommand="${{ inputs.presync-command-file-path }}",waitInterval=30000'
         }
         
         if (!!"${{ inputs.postsync-command-file-path }}") {
-          $arguments += "-postSync:runCommand=`"${{ inputs.postsync-command-file-path }}`",waitInterval=30000"
+          $arguments += '-postSync:runCommand="${{ inputs.postsync-command-file-path }}",waitInterval=30000'
         }
         
         $max_retries = 3
