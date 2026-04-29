@@ -7,9 +7,9 @@ It is using Powershell so is intended for Windows runners.
 ## Inputs
 
 ### jfrog-repo-name:
-Name of JFrog repository to download from. **Required**
+Name of JFrog repository to download from. Checking only local-storage-path if no value provided.
 ### jfrog-username:
-  JFrog username to use for downloading artifact. Should have READ permissions. **Required**
+  JFrog username to use for downloading artifact. Should have READ permissions.
 ### jfrog-password:
   JFrog user password.
 ### search-phrase:

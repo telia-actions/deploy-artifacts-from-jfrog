@@ -2,11 +2,11 @@ name: 'Deploy artifacts to IIS using WebDeploy'
 description: 'Download artifacts from JFrog by given repository name and unique string (usually short git sha) in the artifact name and deploys to given server. Uses Powershell.'
 inputs:
   jfrog-repo-name:
-    description: 'Name of JFrog repository to download from'
-    required: true
+    description: 'Name of JFrog repository to download from. Checking only local-storage-path if no value provided.'
+    required: false
   jfrog-username:
     description: 'JFrog username to use for downloading artifact. Should have READ permissions.'
-    required: true
+    required: false
   jfrog-password:
     description: 'JFrog user password'
     required: false
@@ -78,6 +78,11 @@ runs:
         $firstArtifact = $null
         $artifactDestinationPath = "${{ github.workspace }}\_deploy"
         $localStoragePath = "${{ inputs.local-storage-path }}"
+        $jfrogRepo = "${{ inputs.jfrog-repo-name }}"
+        
+        if (!$jfrogRepo -and !$localStoragePath) {
+          throw "A value for at least on of 'local-storage-path' or 'jfrog-repo-name' parameters should be provided"
+        }
         
         # Checking local storage first
         if (!!$localStoragePath) {
@@ -95,14 +100,18 @@ runs:
           }
         }
         
+        if (!$firstArtifact && !$jfrogRepo) {
+          throw "No artifact found with GIT commit hash in local storage ${{ inputs.commit_hash }}"
+        }
+        
         # Searching in JFrog
         if (!$firstArtifact) {
-          WriteLog("Searching for artifact with '$searchValue' in JFrog repository '${{ inputs.jfrog-repo-name }}'")
+          WriteLog("Searching for artifact with '$searchValue' in JFrog repository '$jfrogRepo'")
           
           $authHeaderValue = "Basic " + [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("${{ inputs.jfrog-username }}:${{ inputs.jfrog-password }}"))
           $response = Invoke-WebRequest `
             -Method Get `
-            -Uri "https://jfrog.teliacompany.io/artifactory/api/search/artifact?name=$searchValue&repos=${{ inputs.jfrog-repo-name }}" `
+            -Uri "https://jfrog.teliacompany.io/artifactory/api/search/artifact?name=$searchValue&repos=$jfrogRepo" `
             -Headers @{ "Authorization" = $authHeaderValue; "X-Result-Detail" = "info" } `
             -UseBasicParsing
           
@@ -110,7 +119,7 @@ runs:
           $firstArtifact = $results | Sort-Object created -Descending | Select-Object -First 1
           
           if (!$firstArtifact) {
-            throw "No artifact found with GIT commit hash ${{ inputs.commit_hash }}"
+            throw "No artifact found with GIT commit hash in JFrog ${{ inputs.commit_hash }}"
           }
           
           WriteLog("Downloading artifact '$firstArtifact'")
