@@ -1,6 +1,9 @@
 name: 'Deploy artifacts to IIS using WebDeploy'
 description: 'Download artifacts from JFrog by given repository name and unique string (usually short git sha) in the artifact name and deploys to given server. Uses Powershell.'
 inputs:
+  local-storage-path:
+    description: 'Optional path of local (usually self-hosted) runner''s directory where artifacts might be stored for faster access (instead of downloading from JFrog and extracting). Action continues with searching in JFrog if no matches found locally.'
+    required: false
   jfrog-repo-name:
     description: 'Name of JFrog repository to download from. Checking only local-storage-path if no value provided.'
     required: false
@@ -11,7 +14,7 @@ inputs:
     description: 'JFrog user password'
     required: false
   search-phrase:
-    description: 'Substring of artifact name, usually short GIT SHA'
+    description: 'Substring of artifact name, usually short GIT SHA. Can be multiple search phrases delimited by triple pipe sign |||. In that case corresponding target parameters (runner-destination-path, server-iis-site-name or server-destination-path) should have the same number of values delimited by triple pipe sign |||.'
     required: true
   search-phrase-cleanup:
     description: 'Flag indicating if search-phrase input should be cleaned from spaces. Accepts "True" or "False" values. "True" by default'
@@ -20,6 +23,12 @@ inputs:
     description: 'Extension of artifact archive file'
     required: true
     default: 'zip'
+  runner-destination-path:
+    description: 'Path to runner''s directory to download artifact to. Deployment part will be skipped if this parameter is provided. This is useful if you need to do some additional steps before deploying to the server.'
+    required: false
+  runner-source-path:
+    description: 'Path to runner''s directory where artifact was previously downloaded. Local storage and JFrog are not checked if this parameter is provided. This is used as a deploy step if you need to do some addtional steps before deploying to the server (see parameter runner-destination-path).'
+    required: false
   server-msdeploy-url:
     description: 'Url of server msdeploy, usually in format of https://some-server-name:8172/msdeploy.axd'
     required: true
@@ -46,9 +55,7 @@ inputs:
     required: false
   msdeploy-skip-parameter:
     description: 'Optional MsDeploy -skip parameter value. For example, objectName=dirPath,absolutePath=Logs, or objectName=filePath,absolutePath=site.config. For multiple values pass semicolon separated values, for example, "objectName=appPool;objectName=application"'
-  local-storage-path:
-    description: 'Optional path of local (usually self-hosted) runner''s directory where artifacts might be stored for faster access (instead of downloading from JFrog and extracting). Action continues with searching in JFrog if no matches found locally.'
-    required: false
+
 runs:
   using: "composite"
   steps:
@@ -58,171 +65,235 @@ runs:
         
         function WriteLog {
           param (
-            $Text
+            [Parameter(Mandatory)]
+            [string]$Text
           )
           
           Write-Host "$(Get-Date -Format o): " -NoNewline -BackgroundColor DarkMagenta -ForegroundColor Yellow
           Write-Host $Text -BackgroundColor DarkMagenta -ForegroundColor Gray
         }
         
-        # validations
-        if (!"${{ inputs.server-iis-site-name }}" -and !"${{ inputs.server-destination-path }}") {
-          throw "Missing parameter value: either server-iis-site-name or server-destination-path must be provided."
+        
+        function Split-NonEmpty {
+          param (
+            [Parameter(Mandatory)]
+            [AllowEmptyString()]
+            [string]$InputString
+          )
+          
+          ,@($InputString -split "\|\|\|" |
+          ForEach-Object { $_.Trim() } |
+          Where-Object { $_ -ne '' })
         }
         
+        
         $searchValue = "${{ inputs.search-phrase }}"
+        $runnerSourcePath = "${{ inputs.runner-source-path }}"
         if ("${{ inputs.search-phrase-cleanup }}" -ne "False") {
           $searchValue = $searchValue.Replace(" ", "")
         }
         
-        $firstArtifact = $null
-        $artifactDestinationPath = "${{ github.workspace }}\_deploy"
-        $localStoragePath = "${{ inputs.local-storage-path }}"
-        $jfrogRepo = "${{ inputs.jfrog-repo-name }}"
-        
-        if (!$jfrogRepo -and !$localStoragePath) {
-          throw "A value for at least on of 'local-storage-path' or 'jfrog-repo-name' parameters should be provided"
+        if (!$searchValue -and !$runnerSourcePath) {
+          throw "search-phrase or runner-source-path parameter is required."
         }
         
-        # Checking local storage first
-        if (!!$localStoragePath) {
-          WriteLog("Searching for artifact with '$searchValue' in local storage '$localStoragePath'")
-          $results = Get-ChildItem -Path "$localStoragePath" -Filter "*$searchValue*"
-          $firstArtifact = $results | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          
-          if (!$firstArtifact) {
-            WriteLog("No artifact found in local storage '$localStoragePath'")
-          } else {
-            WriteLog("Found artifact '$firstArtifact', copying to '$artifactDestinationPath'")
-            $robocopy_params = @("$localStoragePath\$firstArtifact", $artifactDestinationPath)
-            $robocopy_options = @("*.*", "/s", "/COPY:DAT", "/NODCOPY")
-            & robocopy $robocopy_params + $robocopy_options #using robocopy instead of Copy-Item to be able to manage long paths (Copy-Item has some limits)
-          }
+        if (!$searchValue -and !!$runnerSourcePath) {
+          $searchValue = $runnerSourcePath #dummy assignment in cases when no actual search is needed, only deployment from runner's source path. This is to be able to use the same "foreach ($search in $searchValues)" loop
         }
         
-        if (!$firstArtifact && !$jfrogRepo) {
-          throw "No artifact found with GIT commit hash in local storage ${{ inputs.commit_hash }}"
+        $searchValues = Split-NonEmpty($searchValue)
+        $targetSites = Split-NonEmpty("${{ inputs.server-iis-site-name }}")
+        $targetPaths = Split-NonEmpty("${{ inputs.server-destination-path }}")
+        $targetRunnerPaths = Split-NonEmpty("${{ inputs.runner-destination-path }}")
+        $sourceRunnerPaths = Split-NonEmpty($runnerSourcePath)
+        
+        if (($targetSites.Count -ne $searchValues.Count) -and ($targetPaths.Count -ne $searchValues.Count) -and ($targetRunnerPaths.Count -ne $searchValues.Count)) {
+          throw "Missing or incorrect parameter value: either server-iis-site-name, server-destination-path or runner-destination-path must be provided and have the same number of delimited elements as provided search-phrase"
         }
         
-        # Searching in JFrog
-        if (!$firstArtifact) {
-          WriteLog("Searching for artifact with '$searchValue' in JFrog repository '$jfrogRepo'")
+        $index = 0
+        foreach ($search in $searchValues) {
+          $firstArtifact = $null
+          $tempArtifactPathOnRunner = "${{ github.workspace }}\_deploy"
+          $localStoragePath = "${{ inputs.local-storage-path }}"
+          $jfrogRepo = "${{ inputs.jfrog-repo-name }}"
           
-          $authHeaderValue = "Basic " + [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("${{ inputs.jfrog-username }}:${{ inputs.jfrog-password }}"))
-          $response = Invoke-WebRequest `
-            -Method Get `
-            -Uri "https://jfrog.teliacompany.io/artifactory/api/search/artifact?name=$searchValue&repos=$jfrogRepo" `
-            -Headers @{ "Authorization" = $authHeaderValue; "X-Result-Detail" = "info" } `
-            -UseBasicParsing
+          $runnerSourcePath = $sourceRunnerPaths[$index]
+          $runnerDestinationPath = $targetRunnerPaths[$index]
+          $targetSite = $targetSites[$index]
+          $targetPath = $targetPaths[$index]
           
-          $results = (ConvertFrom-Json -InputObject ([System.Text.Encoding]::UTF8.GetString($response.Content))).results
-          $firstArtifact = $results | Sort-Object created -Descending | Select-Object -First 1
-          
-          if (!$firstArtifact) {
-            throw "No artifact found with GIT commit hash in JFrog ${{ inputs.commit_hash }}"
+          if (!!$runnerDestinationPath) {
+            $tempArtifactPathOnRunner = $runnerDestinationPath
           }
           
-          WriteLog("Downloading artifact '$firstArtifact'")
-          
-          Invoke-WebRequest `
-            -Method Get `
-            -Uri $firstArtifact.downloadUri `
-            -Headers @{ "Authorization" = $authHeaderValue } `
-            -OutFile "${{ github.workspace }}\Artifact.${{ inputs.archive-extension }}" `
-            -UseBasicParsing
-          
-          WriteLog("Extracting artifact to '$artifactDestinationPath'")
-          
-          $artifactZip = "${{ github.workspace }}\Artifact.${{ inputs.archive-extension }}"
-          Expand-Archive -Path $artifactZip -DestinationPath $artifactDestinationPath -Force
-        }
-        
-        $msdeployPath = "C:\Program Files\IIS\Microsoft Web Deploy V3\msdeploy.exe"
-        
-        if (!(Test-Path $msdeployPath)) {
-          WriteLog("Web Deploy installation not found, downloading and installing")
-          
-          # URL for Web Deploy installer
-          $url = "https://download.microsoft.com/download/0/1/D/01DC28EA-638C-4A22-A57B-4CEF97755C6C/WebDeploy_amd64_en-US.msi"
-          
-          # Define the output location for the installer
-          $output = "$env:TEMP\WebDeploy_amd64_en-US.msi"
-          echo $output
-          
-          # Download the installer
-          Invoke-WebRequest -Uri $url -OutFile $output
-          
-          # Install Web Deploy
-          Start-Process msiexec.exe -Wait -ArgumentList "/I $output /quiet /qn /norestart" -verbose
-          
-          # Remove the installer
-          Remove-Item -Path $output
-          
-          WriteLog("Web Deploy installed successfully")
-        }
-        
-        
-        $arguments = @(
-            "-verb:sync",
-            "-AllowUntrusted",
-            "-verbose",
-            "-enableRule:AppOffline"
-        )
-        
-        if (!!"${{ inputs.server-iis-site-name }}") {
-          $arguments += @(
-            '-dest:iisApp=${{ inputs.server-iis-site-name }},computerName=${{ inputs.server-msdeploy-url }},username=${{ inputs.server-msdeploy-username }},password="${{ inputs.server-msdeploy-password }}",authtype=Basic,includeAcls=False',
-            "-source:iisApp=$artifactDestinationPath\${{ inputs.application-path }}"
-          )
-        } else {
-          $arguments += @(
-            '-dest:dirPath="${{ inputs.server-destination-path }}",computerName=${{ inputs.server-msdeploy-url }},username=${{ inputs.server-msdeploy-username }},password="${{ inputs.server-msdeploy-password }}",authtype=Basic,includeAcls=False',
-            "-source:dirPath=$artifactDestinationPath\${{ inputs.application-path }}"
-          )
-        }
-        
-        if (!!"${{ inputs.msdeploy-skip-parameter }}") {
-          foreach ($skipParam in "${{ inputs.msdeploy-skip-parameter }}".Split(";")) {
-            $arguments += "-skip:$skipParam"
+          if (!!$runnerSourcePath) {
+            $tempArtifactPathOnRunner = $runnerSourcePath
           }
-        }
-        
-        if (!!"${{ inputs.presync-command-file-path }}") {
-          $arguments += '-preSync:runCommand="${{ inputs.presync-command-file-path }}",waitInterval=30000'
-        }
-        
-        if (!!"${{ inputs.postsync-command-file-path }}") {
-          $arguments += '-postSync:runCommand="${{ inputs.postsync-command-file-path }}",waitInterval=30000'
-        }
-        
-        $max_retries = 3
-        $retries = 0
-        
-        do {
-          WriteLog("Deploying to ${{ inputs.server-msdeploy-url }}")
           
-          try {
-            & $msdeployPath $arguments
+          #Some validations
+          if (!$jfrogRepo -and !$localStoragePath -and !$runnerSourcePath) {
+            throw "A value for at least on of 'local-storage-path', 'jfrog-repo-name' or 'runner-source-path' parameters should be provided"
+          }
+          
+          # Checking local storage first
+          if (!!$localStoragePath -and !$runnerSourcePath) {
+            WriteLog("Searching for artifact with '$search' in local storage '$localStoragePath'")
+            $results = Get-ChildItem -Path "$localStoragePath" -Filter "*$search*"
+            $firstArtifact = $results | Sort-Object LastWriteTime -Descending | Select-Object -First 1
             
-            if ($lastexitcode -ne 0) {
-              echo "Last exit code = $lastexitcode"
-              throw
-            }
-            
-            WriteLog("Done!")
-            break;
-            
-          } catch {
-            if ($retries -lt $max_retries) {
-              WriteLog("Failed. Retrying in a few seconds.")
-              $retries++
-              Start-Sleep -Milliseconds (3000 * $retries * $retries) #increasing time gaps between retries (3 secs, 12 secs, 27 secs)
+            if (!$firstArtifact) {
+              WriteLog("No artifact found in local storage '$localStoragePath'")
             } else {
-              WriteLog("Deployment failed after $max_retries retries.")
-              $max_retries = 0
+              WriteLog("Found artifact '$firstArtifact', copying to '$tempArtifactPathOnRunner'")
+              $options = @("*.*", "/s", "/COPY:DAT", "/NODCOPY")
+              $args = @("$localStoragePath\$firstArtifact", $tempArtifactPathOnRunner) + $options
+              
+              $p = Start-Process -FilePath robocopy -ArgumentList $args -Wait -PassThru -NoNewWindow
+              $rc = $p.ExitCode
+              
+              if ($rc -ge 8) {
+                  throw "Robocopy failed with exit code $rc."
+              } else {
+                  Write-Host "Robocopy completed with exit code $rc."
+              }
             }
           }
-        } while ($max_retries -ne 0)
-        
-        # Clearing deploy folder just in case some other deploys are to be done in the same workflow.
-        Get-ChildItem $artifactDestinationPath | Remove-Item -recurse -Force
+          
+          # Searching in JFrog
+          if (!$firstArtifact -and !!$jfrogRepo -and !$runnerSourcePath) {
+            WriteLog("Searching for artifact with '$search' in JFrog repository '$jfrogRepo'")
+            
+            $authHeaderValue = "Basic " + [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("${{ inputs.jfrog-username }}:${{ inputs.jfrog-password }}"))
+            $response = Invoke-WebRequest `
+              -Method Get `
+              -Uri "https://jfrog.teliacompany.io/artifactory/api/search/artifact?name=$search&repos=$jfrogRepo" `
+              -Headers @{ "Authorization" = $authHeaderValue; "X-Result-Detail" = "info" } `
+              -UseBasicParsing
+            
+            $results = (ConvertFrom-Json -InputObject ([System.Text.Encoding]::UTF8.GetString($response.Content))).results
+            $firstArtifact = $results | Sort-Object created -Descending | Select-Object -First 1
+            
+            if (!$firstArtifact) {
+              throw "No artifact found with GIT commit hash in JFrog ${{ inputs.commit_hash }}"
+            }
+            
+            WriteLog("Downloading artifact '$firstArtifact'")
+            
+            Invoke-WebRequest `
+              -Method Get `
+              -Uri $firstArtifact.downloadUri `
+              -Headers @{ "Authorization" = $authHeaderValue } `
+              -OutFile "${{ github.workspace }}\Artifact.${{ inputs.archive-extension }}" `
+              -UseBasicParsing
+            
+            WriteLog("Extracting artifact to '$tempArtifactPathOnRunner'")
+            
+            $artifactZip = "${{ github.workspace }}\Artifact.${{ inputs.archive-extension }}"
+            Expand-Archive -Path $artifactZip -DestinationPath $tempArtifactPathOnRunner -Force
+          }
+          
+          if (!$firstArtifact -and !$runnerSourcePath) {
+            throw "No artifact found with GIT commit hash ${{ inputs.commit_hash }}"
+          }
+          
+          if (!$runnerDestinationPath) { #skipping deploy part if runner-destination-path parameter was provided.
+            $msdeployPath = "C:\Program Files\IIS\Microsoft Web Deploy V3\msdeploy.exe"
+            
+            if (!(Test-Path $msdeployPath)) {
+              WriteLog("Web Deploy installation not found, downloading and installing")
+              
+              # URL for Web Deploy installer
+              $url = "https://download.microsoft.com/download/0/1/D/01DC28EA-638C-4A22-A57B-4CEF97755C6C/WebDeploy_amd64_en-US.msi"
+              
+              # Define the output location for the installer
+              $output = "$env:TEMP\WebDeploy_amd64_en-US.msi"
+              echo $output
+              
+              # Download the installer
+              Invoke-WebRequest -Uri $url -OutFile $output
+              
+              # Install Web Deploy
+              Start-Process msiexec.exe -Wait -ArgumentList "/I $output /quiet /qn /norestart" -verbose
+              
+              # Remove the installer
+              Remove-Item -Path $output
+              
+              WriteLog("Web Deploy installed successfully")
+            }
+            
+            
+            $arguments = @(
+                "-verb:sync",
+                "-AllowUntrusted",
+                "-verbose",
+                "-enableRule:AppOffline"
+            )
+            
+            if (!!$targetSite) {
+              $logTarget = "Site: '$targetSite'"
+              $arguments += @(
+                '-dest:iisApp=' + $targetSite + ',computerName=${{ inputs.server-msdeploy-url }},username=${{ inputs.server-msdeploy-username }},password="${{ inputs.server-msdeploy-password }}",authtype=Basic,includeAcls=False'
+                "-source:iisApp=$tempArtifactPathOnRunner\${{ inputs.application-path }}"
+              )
+            } else {
+              $logTarget = "dir: '$targetPath'"
+              $arguments += @(
+                '-dest:dirPath="' + $targetPath + '",computerName=${{ inputs.server-msdeploy-url }},username=${{ inputs.server-msdeploy-username }},password="${{ inputs.server-msdeploy-password }}",authtype=Basic,includeAcls=False'
+                "-source:dirPath=$tempArtifactPathOnRunner\${{ inputs.application-path }}"
+              )
+            }
+            
+            if (!!"${{ inputs.msdeploy-skip-parameter }}") {
+              foreach ($skipParam in "${{ inputs.msdeploy-skip-parameter }}".Split(";")) {
+                $arguments += "-skip:$skipParam"
+              }
+            }
+            
+            if (!!"${{ inputs.presync-command-file-path }}") {
+              $arguments += '-preSync:runCommand="${{ inputs.presync-command-file-path }}",waitInterval=30000'
+            }
+            
+            if (!!"${{ inputs.postsync-command-file-path }}") {
+              $arguments += '-postSync:runCommand="${{ inputs.postsync-command-file-path }}",waitInterval=30000'
+            }
+            
+            $max_retries = 3
+            $retries = 0
+            
+            WriteLog("Deploy arguments debug start:")
+            echo $arguments
+            WriteLog("Deploy arguments debug end")
+            
+            do {
+              WriteLog("Deploying to '${{ inputs.server-msdeploy-url }}', $logTarget")
+              
+              try {
+                & $msdeployPath $arguments
+                
+                if ($lastexitcode -ne 0) {
+                  echo "Last exit code = $lastexitcode"
+                  throw
+                }
+                
+                WriteLog("Done!")
+                break;
+                
+              } catch {
+                if ($retries -lt $max_retries) {
+                  WriteLog("Failed. Retrying in a few seconds.")
+                  $retries++
+                  Start-Sleep -Milliseconds (3000 * $retries * $retries) #increasing time gaps between retries (3 secs, 12 secs, 27 secs)
+                } else {
+                  WriteLog("Deployment failed after $max_retries retries.")
+                  $max_retries = 0
+                }
+              }
+            } while ($max_retries -ne 0)
+            
+            # Clearing deploy folder just in case some other deploys are to be done in the same workflow.
+            Get-ChildItem $tempArtifactPathOnRunner | Remove-Item -recurse -Force
+          }
+          
+          $index++
+        }
