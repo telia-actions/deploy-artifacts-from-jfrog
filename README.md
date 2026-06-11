@@ -11,9 +11,9 @@ It is using Powershell so is intended for Windows runners.
 ### jfrog-repo-name:
 Name of JFrog repository to download from. Checking only local-storage-path if no value provided.
 ### jfrog-username:
-  JFrog username to use for downloading artifact. Should have READ permissions.
+  Depracated. JFrog username to use for downloading artifact. Should have READ permissions. Should be omitted if JFrog OIDC with GitHub is set.
 ### jfrog-password:
-  JFrog user password.
+  Depracated. JFrog user password. Should be omitted if JFrog OIDC with GitHub is set.
 ### search-phrase:
   Substring of artifact name, usually short GIT SHA. Can be multiple search phrases delimited by triple pipe sign |||.
   In that case corresponding target parameters (runner-destination-path, server-iis-site-name or server-destination-path) should have the same number of values delimited by triple pipe sign |||.
@@ -60,6 +60,12 @@ Name of JFrog repository to download from. Checking only local-storage-path if n
             description: 'Short commit version (7 digits) which will be deployed. If nothing is entered the latest will be deployed.'
             required: true
     
+    # This is required for JFrog as per
+    # https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-cloud-providers#adding-permissions-settings
+    permissions:
+      id-token: write
+      contents: read
+    
     jobs:
       deploy artifact:
         runs-on: [self-hosted, windows, example]
@@ -68,8 +74,6 @@ Name of JFrog repository to download from. Checking only local-storage-path if n
           - uses: telia-actions/deploy-artifact-from-jfrog@v1
             with:
               jfrog-repo-name: 'some-jfrog-repo-name'
-              jfrog-username: ${{ vars.JFROG_USERNAME }}
-              jfrog-password: ${{ secrets.JFROG_PASSWORD }}
               search-phrase: ${{ inputs.commit-hash }}
               server-msdeploy-url: ${{ vars.SERVER_DEPLOY_URL }}
               server-msdeploy-username: ${{ vars.SERVER_DEPLOY_USERNAME }}
@@ -90,6 +94,12 @@ Name of JFrog repository to download from. Checking only local-storage-path if n
             description: 'Short commit version (7 digits) which will be deployed. If nothing is entered the latest will be deployed.'
             required: true
     
+    # This is required for JFrog as per
+    # https://docs.github.com/en/actions/deployment/security-hardening-your-deployments/configuring-openid-connect-in-cloud-providers#adding-permissions-settings
+    permissions:
+      id-token: write
+      contents: read
+    
     jobs:
       deploy artifact:
         runs-on: [self-hosted, windows, example]
@@ -99,8 +109,6 @@ Name of JFrog repository to download from. Checking only local-storage-path if n
             with:
               local-storage-path: 'some-local-path-to-artifact'
               jfrog-repo-name: 'some-jfrog-repo-name'
-              jfrog-username: ${{ vars.JFROG_USERNAME }}
-              jfrog-password: ${{ secrets.JFROG_PASSWORD }}
               search-phrase: ${{ inputs.commit-hash }}
               runner-destination-path: '${{ hithub.workspace }}/artifact/'
               

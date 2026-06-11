@@ -8,10 +8,10 @@ inputs:
     description: 'Name of JFrog repository to download from. Checking only local-storage-path if no value provided.'
     required: false
   jfrog-username:
-    description: 'JFrog username to use for downloading artifact. Should have READ permissions.'
+    description: 'Deprecated. JFrog username to use for downloading artifact. Should have READ permissions. Should be omitted if JFrog OIDC with GitHub is set.'
     required: false
   jfrog-password:
-    description: 'JFrog user password'
+    description: 'Deprecated. JFrog user password. Should be omitted if JFrog OIDC with GitHub is set.'
     required: false
   search-phrase:
     description: 'Substring of artifact name, usually short GIT SHA. Can be multiple search phrases delimited by triple pipe sign |||. In that case corresponding target parameters (runner-destination-path, server-iis-site-name or server-destination-path) should have the same number of values delimited by triple pipe sign |||.'
@@ -59,6 +59,16 @@ inputs:
 runs:
   using: "composite"
   steps:
+    - name: Setup JFrog CLI
+      if: inputs.jfrog-username == '' && inputs.jfrog-password == ''
+      uses: jfrog/setup-jfrog-cli@v4
+      id: jfrog_oidc
+      env:  
+        JF_URL: https://jfrog.teliacompany.io
+      with:
+        oidc-provider-name: github-cloud
+        oidc-audience: github-cloud
+
     - name: Download artifact
       shell: powershell
       run: |
@@ -164,7 +174,7 @@ runs:
           if (!$firstArtifact -and !!$jfrogRepo -and !$runnerSourcePath) {
             WriteLog("Searching for artifact with '$search' in JFrog repository '$jfrogRepo'")
             
-            $authHeaderValue = "Basic " + [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("${{ inputs.jfrog-username }}:${{ inputs.jfrog-password }}"))
+            $authHeaderValue = "Basic " + [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("${{ inputs.jfrog-username || steps.jfrog_oidc.outputs.oidc-user }}:${{ inputs.jfrog-password || steps.jfrog_oidc.outputs.oidc-token }}"))
             $response = Invoke-WebRequest `
               -Method Get `
               -Uri "https://jfrog.teliacompany.io/artifactory/api/search/artifact?name=$search&repos=$jfrogRepo" `
